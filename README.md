@@ -7,3 +7,6 @@ This makes the game replace the domain which it connects and fixes the requests 
 
 I'm planning on supporting other games as I'm working on something behind the scenes
 <hr>
+
+<b>Q: I'm having problems on build</b><br>
+A: Most likely is the build is set to x64, it needs to be x86
