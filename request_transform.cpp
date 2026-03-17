@@ -108,13 +108,9 @@ static std::string ExtractAction(const std::string& path)
 
 static std::string BuildJson(const std::string& action, const std::string& query)
 {
-    std::string json = "{";
+    std::string params = "";
+    bool first = true;
 
-    // Fixed fields always first
-    json += "\"game\":\"tm1\"";
-    json += ",\"request\":\"" + JsonEscape(action) + "\"";
-
-    // Parse and append query params
     if (!query.empty()) {
         std::istringstream ss(query);
         std::string pair;
@@ -125,16 +121,16 @@ static std::string BuildJson(const std::string& action, const std::string& query
 
             std::string key = UrlDecode(pair.substr(0, eq));
             std::string val = UrlDecode(pair.substr(eq + 1));
-
             if (key.empty()) continue;
 
             std::string outVal = ShouldEncrypt(key) ? SHA256Hex(val) : val;
-            json += ",\"" + JsonEscape(key) + "\":\"" + JsonEscape(outVal) + "\"";
+            if (!first) params += ",";
+            first = false;
+            params += "\"" + JsonEscape(key) + "\":\"" + JsonEscape(outVal) + "\"";
         }
     }
 
-    json += "}";
-    return json;
+    return "{\"game\":\"tm1\",\"request\":\"" + JsonEscape(action) + "\",\"params\":{" + params + "}}";
 }
 
 // -----------------------------------------------------------------------
