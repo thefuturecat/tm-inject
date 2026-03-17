@@ -2,6 +2,10 @@
 #include "proxy_exports.h"
 #include <windows.h>
 
+#ifndef _M_IX86
+#error "This file must be compiled as x86 (Win32). The STUB macro uses x86 inline asm."
+#endif
+
 // One pointer per export
 static void* fp_AppCacheCheckManifest = nullptr;
 static void* fp_AppCacheCloseHandle = nullptr;
