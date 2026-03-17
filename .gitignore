@@ -30,7 +30,6 @@
 *.lai
 *.la
 *.a
-*.lib
 
 # Executables
 *.exe
@@ -39,6 +38,9 @@
 
 # debug information files
 *.dwo
-.vs
+.vs/tm-inject/CopilotIndices
+.vs/tm-inject/copilot-chat
+.vs/tm-inject/FileContentIndex
+.vs/tm-inject/v17
 x64
 Debug
