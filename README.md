@@ -9,4 +9,4 @@ I'm planning on supporting other games as I'm working on something behind the sc
 <hr>
 
 <b>Q: I'm having problems on build</b><br>
-A: Most likely is the build is set to x64, it needs to be x86
+A: Most likely the build is set to x64, it needs to be x86
