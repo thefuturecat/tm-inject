@@ -146,6 +146,7 @@
     <ClInclude Include="MinHook.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="proxy_exports.h" />
+    <ClInclude Include="request_transform.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
@@ -156,6 +157,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="proxy_exports.cpp" />
+    <ClCompile Include="request_transform.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
