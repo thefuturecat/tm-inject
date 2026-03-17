@@ -1,5 +1,5 @@
 # tm-inject
-A .dll to replace trackmania's use for windows native wininet.dll
+A .dll to replace trackmania's use for windows native wininet.dll<br>
 This makes the game replace the domain which it connects and fixes the requests so it uses HTTPS instead of HTTP
 
 <b>Supported Games:</b>
