@@ -19,6 +19,25 @@ PFN_HttpOpenRequestA  fpHttpOpenRequestA = nullptr;
 PFN_HttpSendRequestA  fpHttpSendRequestA = nullptr;
 PFN_InternetCloseHandle fpInternetCloseHandle = nullptr;
 
+static void DebugLog(const char* fmt, ...)
+{
+    // Write to the same folder as the DLL
+    char path[MAX_PATH];
+    GetModuleFileNameA(NULL, path, MAX_PATH); // gets the EXE path
+    char* slash = strrchr(path, '\\');
+    if (slash) *(slash + 1) = '\0';
+    strcat_s(path, "tm_debug.txt");
+
+    FILE* f = nullptr;
+    fopen_s(&f, path, "a");
+    if (!f) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(f, fmt, args);
+    va_end(args);
+    fclose(f);
+}
+
 HINTERNET WINAPI Hook_InternetConnectA(
     HINTERNET hInternet, LPCSTR lpszServerName,
     INTERNET_PORT nServerPort, LPCSTR lpszUserName,
@@ -42,15 +61,45 @@ HINTERNET WINAPI Hook_HttpOpenRequestA(
     dwFlags |= INTERNET_FLAG_IGNORE_CERT_CN_INVALID;
     dwFlags |= INTERNET_FLAG_IGNORE_CERT_DATE_INVALID;
 
-    // Rewrite path and extract query string
-    std::string query;
-    std::string newPath = RewritePath(lpszObjectName, query);
+    DebugLog("HttpOpenRequestA verb=[%s] path=[%s]\n",
+        lpszVerb ? lpszVerb : "NULL",
+        lpszObjectName ? lpszObjectName : "NULL");
 
-    HINTERNET hReq = fpHttpOpenRequestA(hConnect, lpszVerb, newPath.c_str(),
+    const char* verbToUse = lpszVerb;
+    std::string newPath;
+    std::string action;
+    std::string query; // declared here so it survives after the if block
+
+    if (lpszObjectName) {
+        std::string full(lpszObjectName);
+        auto qpos = full.find('?');
+        std::string path = (qpos != std::string::npos) ? full.substr(0, qpos) : full;
+        query = (qpos != std::string::npos) ? full.substr(qpos + 1) : "";
+
+        std::string pathLower = path;
+        for (size_t i = 0; i < pathLower.size(); i++)
+            pathLower[i] = (char)tolower((unsigned char)pathLower[i]);
+
+        if (pathLower.find("online_game/") != std::string::npos) {
+            auto slash = path.rfind('/');
+            std::string filename = (slash != std::string::npos) ? path.substr(slash + 1) : path;
+            auto dot = filename.rfind('.');
+            action = (dot != std::string::npos) ? filename.substr(0, dot) : filename;
+            newPath = "/request";
+            verbToUse = "POST";
+        }
+        else {
+            newPath = path;
+            query.clear();
+        }
+    }
+
+    // hReq exists now
+    HINTERNET hReq = fpHttpOpenRequestA(hConnect, verbToUse, newPath.c_str(),
         lpszVersion, lpszReferrer, lplpszAcceptTypes, dwFlags, dwContext);
 
-    // Store query params keyed by the new handle
-    if (hReq) StoreQuery(hReq, query);
+    if (hReq && !action.empty())
+        StoreRequestData(hReq, action, query); // one call, with the real query
 
     return hReq;
 }
@@ -59,17 +108,14 @@ BOOL WINAPI Hook_HttpSendRequestA(
     HINTERNET hRequest, LPCSTR lpszHeaders, DWORD dwHeadersLength,
     LPVOID lpOptional, DWORD dwOptionalLength)
 {
-    std::string json = ConsumeJsonBody(hRequest);
-
-    if (!json.empty()) {
-        // Override headers to set Content-Type and send JSON body
+    std::string json;
+    if (ConsumeJsonBody(hRequest, json)) {
+        DebugLog("Sending JSON [%s]\n", json.c_str());  // add this
         std::string headers = "Content-Type: application/json\r\n";
         return fpHttpSendRequestA(hRequest,
             headers.c_str(), (DWORD)headers.size(),
             (LPVOID)json.c_str(), (DWORD)json.size());
     }
-
-    // No transform needed — pass through unchanged
     return fpHttpSendRequestA(hRequest, lpszHeaders, dwHeadersLength,
         lpOptional, dwOptionalLength);
 }

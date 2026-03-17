@@ -4,30 +4,21 @@
 #include <map>
 #include <sstream>
 #include <vector>
+#include <wininet.h>
 #pragma comment(lib, "bcrypt.lib")
 
+// Fields that get SHA-256 hashed instead of sent plain
+static const char* ENCRYPT_FIELDS[] = { "password", "passwd", "pass", "passnew" };
+
 // -----------------------------------------------------------------------
-// PATH REWRITE RULES
-// Add as many as you need — exact match on the path part before '?'
+// Internal state — action name + query string per request handle
 // -----------------------------------------------------------------------
-static const struct { const char* from; const char* to; } PATH_RULES[] =
-{
-    { "/online_game/subscribe.php",      "/one/game/subscribe"    },
-    { "/online_game/unsubscribe.php",    "/one/game/unsubscribe"  },
-    { "/online_game/login.php",          "/one/game/login"        },
-    { "/online_game/get_ladder_zone.php","/one/game/ladder/zones" },
-    // add more here as you discover them
+struct RequestData {
+    std::string action; // e.g. "subscribe"
+    std::string query;  // raw query string e.g. "login=foo&password=bar"
 };
 
-// -----------------------------------------------------------------------
-// FIELDS TO ENCRYPT  (SHA-256 hex, so server just stores/compares hashes)
-// -----------------------------------------------------------------------
-static const char* ENCRYPT_FIELDS[] = { "password", "passwd", "pass" };
-
-// -----------------------------------------------------------------------
-// Internal state
-// -----------------------------------------------------------------------
-static std::map<HINTERNET, std::string> g_queryStrings;
+static std::map<HINTERNET, RequestData> g_requests;
 static CRITICAL_SECTION g_cs;
 
 // -----------------------------------------------------------------------
@@ -41,7 +32,7 @@ static std::string SHA256Hex(const std::string& input)
 
     if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(
         &hAlg, BCRYPT_SHA256_ALGORITHM, nullptr, 0)))
-        return input; // crypto unavailable — return plaintext as fallback
+        return input;
 
     DWORD hashLen = 0, cbResult = 0;
     BCryptGetProperty(hAlg, BCRYPT_HASH_LENGTH,
@@ -55,8 +46,8 @@ static std::string SHA256Hex(const std::string& input)
     BCryptCloseAlgorithmProvider(hAlg, 0);
 
     char hex[3];
-    for (BYTE b : hash) {
-        snprintf(hex, sizeof(hex), "%02x", b);
+    for (size_t i = 0; i < hash.size(); i++) {
+        snprintf(hex, sizeof(hex), "%02x", hash[i]);
         result += hex;
     }
     return result;
@@ -81,26 +72,18 @@ static std::string UrlDecode(const std::string& s)
     return out;
 }
 
-static std::map<std::string, std::string> ParseQuery(const std::string& query)
+static bool ShouldEncrypt(const std::string& key)
 {
-    std::map<std::string, std::string> params;
-    std::istringstream ss(query);
-    std::string pair;
-    while (std::getline(ss, pair, '&')) {
-        auto eq = pair.find('=');
-        if (eq != std::string::npos) {
-            std::string key = UrlDecode(pair.substr(0, eq));
-            std::string val = UrlDecode(pair.substr(eq + 1));
-            params[key] = val;
-        }
-    }
-    return params;
+    for (size_t i = 0; i < sizeof(ENCRYPT_FIELDS) / sizeof(ENCRYPT_FIELDS[0]); i++)
+        if (_stricmp(key.c_str(), ENCRYPT_FIELDS[i]) == 0) return true;
+    return false;
 }
 
 static std::string JsonEscape(const std::string& s)
 {
     std::string out;
-    for (char c : s) {
+    for (size_t i = 0; i < s.size(); i++) {
+        char c = s[i];
         switch (c) {
         case '"':  out += "\\\""; break;
         case '\\': out += "\\\\"; break;
@@ -113,25 +96,43 @@ static std::string JsonEscape(const std::string& s)
     return out;
 }
 
-static bool ShouldEncrypt(const std::string& key)
+// "/online_game/subscribe.php" -> "subscribe"
+static std::string ExtractAction(const std::string& path)
 {
-    for (auto& f : ENCRYPT_FIELDS)
-        if (_stricmp(key.c_str(), f) == 0) return true;
-    return false;
+    auto slash = path.rfind('/');
+    std::string name = (slash != std::string::npos) ? path.substr(slash + 1) : path;
+    auto dot = name.rfind('.');
+    if (dot != std::string::npos) name = name.substr(0, dot);
+    return name;
 }
 
-static std::string BuildJson(const std::map<std::string, std::string>& params)
+static std::string BuildJson(const std::string& action, const std::string& query)
 {
     std::string json = "{";
-    bool first = true;
-    for (std::map<std::string, std::string>::const_iterator it = params.begin(); it != params.end(); ++it) {
-        if (!first) json += ",";
-        first = false;
-        const std::string& key = it->first;
-        const std::string& val = it->second;
-        std::string outVal = ShouldEncrypt(key) ? SHA256Hex(val) : val;
-        json += "\"" + JsonEscape(key) + "\":\"" + JsonEscape(outVal) + "\"";
+
+    // Fixed fields always first
+    json += "\"game\":\"tm1\"";
+    json += ",\"request\":\"" + JsonEscape(action) + "\"";
+
+    // Parse and append query params
+    if (!query.empty()) {
+        std::istringstream ss(query);
+        std::string pair;
+        while (std::getline(ss, pair, '&')) {
+            if (pair.empty()) continue;
+            auto eq = pair.find('=');
+            if (eq == std::string::npos) continue;
+
+            std::string key = UrlDecode(pair.substr(0, eq));
+            std::string val = UrlDecode(pair.substr(eq + 1));
+
+            if (key.empty()) continue;
+
+            std::string outVal = ShouldEncrypt(key) ? SHA256Hex(val) : val;
+            json += ",\"" + JsonEscape(key) + "\":\"" + JsonEscape(outVal) + "\"";
+        }
     }
+
     json += "}";
     return json;
 }
@@ -144,53 +145,70 @@ void TransformInit()
     InitializeCriticalSection(&g_cs);
 }
 
-std::string RewritePath(const char* objectName, std::string& outQuery)
+std::string RewriteToSingleEndpoint(const char* objectName)
 {
-    outQuery.clear();
-    if (!objectName) return "";
+    if (!objectName) return "/request";
 
     std::string full(objectName);
     std::string path = full;
-
     auto qpos = full.find('?');
-    if (qpos != std::string::npos) {
+    if (qpos != std::string::npos)
         path = full.substr(0, qpos);
-        outQuery = full.substr(qpos + 1);
-    }
 
-    for (auto& rule : PATH_RULES)
-        if (_stricmp(path.c_str(), rule.from) == 0)
-            return rule.to;
+    // Only rewrite known game API paths — leave anything else alone
+    if (path.find("/online_game/") != std::string::npos)
+        return "/request";
 
-    return path; // no rule matched — still strip the query string
+    return path; // not a game API call, pass through unchanged
 }
 
-void StoreQuery(HINTERNET hRequest, const std::string& query)
+void StoreRequestData(HINTERNET hRequest, const std::string& action, const std::string& query)
 {
-    if (query.empty()) return;
     EnterCriticalSection(&g_cs);
-    g_queryStrings[hRequest] = query;
+    RequestData& rd = g_requests[hRequest];
+    rd.action = action;
+    rd.query = query;
     LeaveCriticalSection(&g_cs);
 }
 
-std::string ConsumeJsonBody(HINTERNET hRequest)
+bool ConsumeJsonBody(HINTERNET hRequest, std::string& outJson)
 {
     EnterCriticalSection(&g_cs);
-    auto it = g_queryStrings.find(hRequest);
-    std::string query;
-    if (it != g_queryStrings.end()) {
-        query = it->second;
-        g_queryStrings.erase(it);
+    std::map<HINTERNET, RequestData>::iterator it = g_requests.find(hRequest);
+    if (it == g_requests.end()) {
+        LeaveCriticalSection(&g_cs);
+        return false;
     }
+    std::string action = it->second.action;
+    std::string query = it->second.query;
+    g_requests.erase(it);
     LeaveCriticalSection(&g_cs);
 
-    if (query.empty()) return "";
-    return BuildJson(ParseQuery(query));
+    outJson = BuildJson(action, query);
+    return true;
 }
 
 void ClearRequestData(HINTERNET hRequest)
 {
     EnterCriticalSection(&g_cs);
-    g_queryStrings.erase(hRequest);
+    g_requests.erase(hRequest);
+    LeaveCriticalSection(&g_cs);
+}
+
+// request_transform.cpp — add these two
+bool HasStoredAction(HINTERNET hRequest)
+{
+    EnterCriticalSection(&g_cs);
+    bool found = g_requests.find(hRequest) != g_requests.end();
+    LeaveCriticalSection(&g_cs);
+    return found;
+}
+
+void UpdateStoredQuery(HINTERNET hRequest, const std::string& query)
+{
+    EnterCriticalSection(&g_cs);
+    std::map<HINTERNET, RequestData>::iterator it = g_requests.find(hRequest);
+    if (it != g_requests.end())
+        it->second.query = query;
     LeaveCriticalSection(&g_cs);
 }
