@@ -130,7 +130,7 @@ static std::string BuildJson(const std::string& action, const std::string& query
         }
     }
 
-    return "{\"game\":\"tm1\",\"request\":\"" + JsonEscape(action) + "\",\"params\":{" + params + "}}";
+    return "[{\"game\":\"tm1\",\"request\":\"" + JsonEscape(action) + "\",\"params\":{" + params + "}}]";
 }
 
 // -----------------------------------------------------------------------
