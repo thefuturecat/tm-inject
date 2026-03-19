@@ -7,23 +7,18 @@
 #include <wininet.h>
 #pragma comment(lib, "bcrypt.lib")
 
-// Fields that get SHA-256 hashed instead of sent plain
 static const char* ENCRYPT_FIELDS[] = { "password", "passwd", "pass", "passnew" };
 
-// -----------------------------------------------------------------------
-// Internal state — action name + query string per request handle
-// -----------------------------------------------------------------------
 struct RequestData {
-    std::string action; // e.g. "subscribe"
-    std::string query;  // raw query string e.g. "login=foo&password=bar"
+    std::string action;
+    std::string query;
+    char* bodyBuf;   // heap-allocated, kept alive for async send
+    DWORD       bodyLen;
 };
 
 static std::map<HINTERNET, RequestData> g_requests;
 static CRITICAL_SECTION g_cs;
 
-// -----------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------
 static std::string SHA256Hex(const std::string& input)
 {
     BCRYPT_ALG_HANDLE  hAlg = nullptr;
@@ -96,19 +91,9 @@ static std::string JsonEscape(const std::string& s)
     return out;
 }
 
-// "/online_game/subscribe.php" -> "subscribe"
-static std::string ExtractAction(const std::string& path)
-{
-    auto slash = path.rfind('/');
-    std::string name = (slash != std::string::npos) ? path.substr(slash + 1) : path;
-    auto dot = name.rfind('.');
-    if (dot != std::string::npos) name = name.substr(0, dot);
-    return name;
-}
-
 static std::string BuildJson(const std::string& action, const std::string& query)
 {
-    std::string params = "";
+    std::string params;
     bool first = true;
 
     if (!query.empty()) {
@@ -130,32 +115,13 @@ static std::string BuildJson(const std::string& action, const std::string& query
         }
     }
 
-    return "[{\"game\":\"tm1\",\"request\":\"" + JsonEscape(action) + "\",\"params\":{" + params + "}}]";
+    return "[{\"game\":\"tm1\",\"request\":\"" + JsonEscape(action)
+        + "\",\"params\":{" + params + "}}]";
 }
 
-// -----------------------------------------------------------------------
-// Public API
-// -----------------------------------------------------------------------
 void TransformInit()
 {
     InitializeCriticalSection(&g_cs);
-}
-
-std::string RewriteToSingleEndpoint(const char* objectName)
-{
-    if (!objectName) return "/request";
-
-    std::string full(objectName);
-    std::string path = full;
-    auto qpos = full.find('?');
-    if (qpos != std::string::npos)
-        path = full.substr(0, qpos);
-
-    // Only rewrite known game API paths — leave anything else alone
-    if (path.find("/online_game/") != std::string::npos)
-        return "/request";
-
-    return path; // not a game API call, pass through unchanged
 }
 
 void StoreRequestData(HINTERNET hRequest, const std::string& action, const std::string& query)
@@ -164,34 +130,59 @@ void StoreRequestData(HINTERNET hRequest, const std::string& action, const std::
     RequestData& rd = g_requests[hRequest];
     rd.action = action;
     rd.query = query;
+    rd.bodyBuf = nullptr;
+    rd.bodyLen = 0;
     LeaveCriticalSection(&g_cs);
 }
 
-bool ConsumeJsonBody(HINTERNET hRequest, std::string& outJson)
+bool ConsumeJsonBody(HINTERNET hRequest, char** outBuf, DWORD* outLen)
 {
     EnterCriticalSection(&g_cs);
-    std::map<HINTERNET, RequestData>::iterator it = g_requests.find(hRequest);
+    auto it = g_requests.find(hRequest);
     if (it == g_requests.end()) {
         LeaveCriticalSection(&g_cs);
         return false;
     }
+
     std::string action = it->second.action;
     std::string query = it->second.query;
-    g_requests.erase(it);
-    LeaveCriticalSection(&g_cs);
 
-    outJson = BuildJson(action, query);
+    // Free any previous buffer on this handle
+    if (it->second.bodyBuf) {
+        delete[] it->second.bodyBuf;
+        it->second.bodyBuf = nullptr;
+    }
+
+    std::string json = BuildJson(action, query);
+
+    // Heap-allocate so the buffer outlives our stack frame (async send)
+    DWORD len = (DWORD)json.size();
+    char* buf = new char[len];
+    memcpy(buf, json.c_str(), len);
+
+    it->second.bodyBuf = buf;
+    it->second.bodyLen = len;
+
+    *outBuf = buf;
+    *outLen = len;
+
+    LeaveCriticalSection(&g_cs);
     return true;
 }
 
 void ClearRequestData(HINTERNET hRequest)
 {
     EnterCriticalSection(&g_cs);
-    g_requests.erase(hRequest);
+    auto it = g_requests.find(hRequest);
+    if (it != g_requests.end()) {
+        if (it->second.bodyBuf) {
+            delete[] it->second.bodyBuf;
+        }
+        g_requests.erase(it);
+    }
     LeaveCriticalSection(&g_cs);
 }
 
-// request_transform.cpp — add these two
 bool HasStoredAction(HINTERNET hRequest)
 {
     EnterCriticalSection(&g_cs);
@@ -203,7 +194,7 @@ bool HasStoredAction(HINTERNET hRequest)
 void UpdateStoredQuery(HINTERNET hRequest, const std::string& query)
 {
     EnterCriticalSection(&g_cs);
-    std::map<HINTERNET, RequestData>::iterator it = g_requests.find(hRequest);
+    auto it = g_requests.find(hRequest);
     if (it != g_requests.end())
         it->second.query = query;
     LeaveCriticalSection(&g_cs);

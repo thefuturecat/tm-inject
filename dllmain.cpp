@@ -14,16 +14,15 @@ typedef HINTERNET(WINAPI* PFN_HttpOpenRequestA)(HINTERNET, LPCSTR, LPCSTR, LPCST
 typedef BOOL(WINAPI* PFN_HttpSendRequestA)(HINTERNET, LPCSTR, DWORD, LPVOID, DWORD);
 typedef BOOL(WINAPI* PFN_InternetCloseHandle)(HINTERNET);
 
-PFN_InternetConnectA  fpInternetConnectA = nullptr;
-PFN_HttpOpenRequestA  fpHttpOpenRequestA = nullptr;
-PFN_HttpSendRequestA  fpHttpSendRequestA = nullptr;
+PFN_InternetConnectA    fpInternetConnectA = nullptr;
+PFN_HttpOpenRequestA    fpHttpOpenRequestA = nullptr;
+PFN_HttpSendRequestA    fpHttpSendRequestA = nullptr;
 PFN_InternetCloseHandle fpInternetCloseHandle = nullptr;
 
 static void DebugLog(const char* fmt, ...)
 {
-    // Write to the same folder as the DLL
     char path[MAX_PATH];
-    GetModuleFileNameA(NULL, path, MAX_PATH); // gets the EXE path
+    GetModuleFileNameA(NULL, path, MAX_PATH);
     char* slash = strrchr(path, '\\');
     if (slash) *(slash + 1) = '\0';
     strcat_s(path, "tm_debug.txt");
@@ -68,7 +67,7 @@ HINTERNET WINAPI Hook_HttpOpenRequestA(
     const char* verbToUse = lpszVerb;
     std::string newPath;
     std::string action;
-    std::string query; // declared here so it survives after the if block
+    std::string query;
 
     if (lpszObjectName) {
         std::string full(lpszObjectName);
@@ -94,12 +93,11 @@ HINTERNET WINAPI Hook_HttpOpenRequestA(
         }
     }
 
-    // hReq exists now
     HINTERNET hReq = fpHttpOpenRequestA(hConnect, verbToUse, newPath.c_str(),
         lpszVersion, lpszReferrer, lplpszAcceptTypes, dwFlags, dwContext);
 
     if (hReq && !action.empty())
-        StoreRequestData(hReq, action, query); // one call, with the real query
+        StoreRequestData(hReq, action, query);
 
     return hReq;
 }
@@ -108,21 +106,33 @@ BOOL WINAPI Hook_HttpSendRequestA(
     HINTERNET hRequest, LPCSTR lpszHeaders, DWORD dwHeadersLength,
     LPVOID lpOptional, DWORD dwOptionalLength)
 {
-    std::string json;
-    if (ConsumeJsonBody(hRequest, json)) {
-        DebugLog("Sending JSON [%s]\n", json.c_str());  // add this
-        std::string headers = "Content-Type: application/json\r\n";
-        return fpHttpSendRequestA(hRequest,
-            headers.c_str(), (DWORD)headers.size(),
-            (LPVOID)json.c_str(), (DWORD)json.size());
+    char* bodyBuf = nullptr;
+    DWORD  bodyLen = 0;
+
+    if (!ConsumeJsonBody(hRequest, &bodyBuf, &bodyLen)) {
+        return fpHttpSendRequestA(hRequest, lpszHeaders, dwHeadersLength,
+            lpOptional, dwOptionalLength);
     }
-    return fpHttpSendRequestA(hRequest, lpszHeaders, dwHeadersLength,
-        lpOptional, dwOptionalLength);
+
+    DebugLog("Sending JSON [%.*s]\n", (int)bodyLen, bodyBuf);
+
+    // Set headers — bodyBuf is heap-allocated and stays alive for the async send
+    char clHeader[128];
+    snprintf(clHeader, sizeof(clHeader),
+        "Content-Type: application/json\r\nContent-Length: %lu\r\n", bodyLen);
+
+    HttpAddRequestHeadersA(hRequest, clHeader, (DWORD)strlen(clHeader),
+        HTTP_ADDREQ_FLAG_REPLACE | HTTP_ADDREQ_FLAG_ADD);
+
+    return fpHttpSendRequestA(hRequest,
+        nullptr, 0,
+        (LPVOID)bodyBuf, bodyLen);
+    // bodyBuf is freed in ClearRequestData when the handle is closed
 }
 
 BOOL WINAPI Hook_InternetCloseHandle(HINTERNET hInternet)
 {
-    ClearRequestData(hInternet); // clean up any leftover map entries
+    ClearRequestData(hInternet);   // frees heap buffer and map entry
     return fpInternetCloseHandle(hInternet);
 }
 
